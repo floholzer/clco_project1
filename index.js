@@ -2,39 +2,36 @@ const pulumi = require("@pulumi/pulumi");
 const azure = require("@pulumi/azure-native");
 
 // Configuration variables
+const resourceGroupName = "clco_project1";
 const location = "northeurope";
-const vnetAddressSpace = "10.0.0.0/16";
-const subnetAddressPrefix = "10.0.1.0/24";
-const dnsZoneName = "privatelink.cognitiveservices.azure.com";
 const cognitiveServiceKind = "TextAnalytics";
 const appServicePlanSku = { name: "P1v2", tier: "PremiumV2", size: "P1v2", capacity: 3 };
 const pythonVersion =  "PYTHON|3.9";
 
-// Resource Group
-const resourceGroup = new azure.resources.ResourceGroup("resourceGroup", {
+// Resource Group erstellen
+const resourceGroup = new azure_native.resources.ResourceGroup(resourceGroupName, {
     location: location,
 });
 
-// Virtual Network
-const virtualNetwork = new azure.network.VirtualNetwork("virtualNetwork", {
+// Virtuelles Netzwerk erstellen
+const vnet = new azure_native.network.VirtualNetwork("vnet", {
     resourceGroupName: resourceGroup.name,
     location: resourceGroup.location,
-    addressSpace: { addressPrefixes: [vnetAddressSpace] },
+    addressSpace: { addressPrefixes: ["10.0.0.0/16"] },
 });
 
-// Subnet
-const subnet = new azure.network.Subnet("subnet", {
+// Subnetz erstellen
+const subnet = new azure_native.network.Subnet("subnet", {
     resourceGroupName: resourceGroup.name,
-    virtualNetworkName: virtualNetwork.name,
-    addressPrefix: subnetAddressPrefix,
-    privateEndpointNetworkPolicies: "Disabled",
+    virtualNetworkName: vnet.name,
+    addressPrefix: "10.0.1.0/24",
 });
 
 // Private DNS Zone
 const privateDnsZone = new azure.network.PrivateZone("privateDnsZone", {
     resourceGroupName: resourceGroup.name,
     location: "global",
-    privateZoneName: dnsZoneName,
+    privateZoneName: "privatelink.cognitiveservices.azure.com",
 });
 
 // Virtual Network Link to DNS Zone
