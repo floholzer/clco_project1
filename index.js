@@ -4,27 +4,34 @@ const azure = require("@pulumi/azure-native");
 // Configuration variables
 const resourceGroupName = "clco_project1";
 const location = "northeurope";
-const cognitiveServiceKind = "TextAnalytics";
-const appServicePlanSku = { name: "P1v2", tier: "PremiumV2", size: "P1v2", capacity: 3 };
-const pythonVersion =  "PYTHON|3.9";
+const appServicePlanSku = {name: "B1", tier: "Basic", size: "B1", capacity: 3};
+const pythonVersion = "PYTHON|3.8";
+const SC_BRANCH ="main";
+const SC_URL = "https://github.com/dmelichar/clco-demo.git";
+const webAppName = "project1";
+
+
 
 // Resource Group erstellen
-const resourceGroup = new azure_native.resources.ResourceGroup(resourceGroupName, {
+const resourceGroup = new azure.resources.ResourceGroup(resourceGroupName, {
     location: location,
 });
 
 // Virtuelles Netzwerk erstellen
-const vnet = new azure_native.network.VirtualNetwork("vnet", {
+const vnet = new azure.network.VirtualNetwork("vnet", {
     resourceGroupName: resourceGroup.name,
     location: resourceGroup.location,
-    addressSpace: { addressPrefixes: ["10.0.0.0/16"] },
-});
-
-// Subnetz erstellen
-const subnet = new azure_native.network.Subnet("subnet", {
-    resourceGroupName: resourceGroup.name,
-    virtualNetworkName: vnet.name,
-    addressPrefix: "10.0.1.0/24",
+    addressSpace: {addressPrefixes: ["10.0.0.0/16"]},
+    subnets: [
+        {
+            name: "webAppSubnet",
+            addressPrefix: "10.0.1.0/24",
+        },
+        {
+            name: "cognitivSubnet",
+            addressPrefix: "10.0.2.0/24",
+        },
+    ],
 });
 
 // Private DNS Zone
@@ -35,47 +42,42 @@ const privateDnsZone = new azure.network.PrivateZone("privateDnsZone", {
 });
 
 // Virtual Network Link to DNS Zone
-const vnetLink = new azure.network.VirtualNetworkLink("vnetLink", {
+const vnetLink = new azure.network.VirtualNetworkLink(`${vnet}-link`, {
     resourceGroupName: resourceGroup.name,
     privateZoneName: privateDnsZone.name,
-    virtualNetwork: { id: virtualNetwork.id },
-    registrationEnabled: false,
+    virtualNetwork: {id: vnet.id},
+    registrationEnabled: true,
 });
 
 // Cognitive Services Account
 const cognitiveAccount = new azure.cognitiveservices.Account("cognitiveAccount", {
     resourceGroupName: resourceGroup.name,
     location: resourceGroup.location,
-    kind: cognitiveServiceKind,
-    sku: { name: "S0" },
+    identity: {
+        type: azure.cognitiveservices.ResourceIdentityType.SystemAssigned,
+    },
+    kind: "TextAnalytics",
+    sku: {name: "S"},
     properties: {
         networkAcls: {
             defaultAction: "Deny",
-            virtualNetworkRules: [{ id: subnet.id }],
-        },
+            virtualNetworkRules: [{
+                id: vnet.subnets[1].id,
+            }],
+        }
     },
 });
 
 // Private Endpoint for Cognitive Services
-const cognitivePrivateEndpoint = new azure.network.PrivateEndpoint("cognitivePrivateEndpoint", {
+const privateEndpoint = new azure.network.PrivateEndpoint(`${cognitiveAccount.name}-endpoint`, {
     resourceGroupName: resourceGroup.name,
     location: resourceGroup.location,
-    subnet: { id: subnet.id },
+    subnet: {id: vnet.subnets[1].id},
     privateLinkServiceConnections: [{
-        name: "cognitiveServiceConnection",
+        name: `${cognitiveAccount.name}-connection`,
         privateLinkServiceId: cognitiveAccount.id,
         groupIds: ["cognitiveservices"],
     }],
-});
-
-// DNS A Record for Cognitive Services Private Endpoint
-const cognitiveDnsRecord = new azure.network.RecordSet("cognitiveDnsRecord", {
-    resourceGroupName: resourceGroup.name,
-    zoneName: privateDnsZone.name,
-    relativeRecordSetName: "cognitiveservices",
-    recordType: "A",
-    ttl: 3600,
-    aRecords: [{ ipv4Address: cognitivePrivateEndpoint.privateIpAddress }],
 });
 
 // App Service Plan
@@ -88,32 +90,49 @@ const appServicePlan = new azure.web.AppServicePlan("appServicePlan", {
 });
 
 // Web App
-const webApp = new azure.web.WebApp("webApp", {
+const webApp = new azure.web.WebApp(`${webAppName}-WebApp`, {
     resourceGroupName: resourceGroup.name,
     location: resourceGroup.location,
     serverFarmId: appServicePlan.id,
+    httpsOnly: true,
     siteConfig: {
         linuxFxVersion: pythonVersion,
         vnetRouteAllEnabled: true,
         scmType: "LocalGit",
+        virtualNetworkSubnetId: vnet.subnets[0].id,
+        virtualApplications: [{
+            virtualPath: "/",
+            physicalPath: "site\\wwwroot",
+            preloadEnabled: true,
+        }],
     },
-    httpsOnly: true,
 });
 
-// App Settings Configuration
-const appSettings = new azure.web.WebAppApplicationSettings("appSettings", {
+// Configure App Settings with Cognitive Services Endpoint and Key
+const appSettings = new azure.web.WebAppApplicationSettings(`${webAppName}-AppSettings`, {
     resourceGroupName: resourceGroup.name,
     name: webApp.name,
     properties: {
-        "COGNITIVE_SERVICE_ENDPOINT": cognitiveAccount.endpoint,
-        "COGNITIVE_SERVICE_KEY": cognitiveAccount.listKeys().primaryKey,
+        "COGNITIVE_ENDPOINT": cognitiveAccount.endpoint,
+        "COGNITIVE_KEY": cognitiveAccount.key1,
     },
+});
+
+// add Source Control
+const sourceControl = new azure.web.WebAppSourceControl(`${webAppName}-SC`, {
+    name: webApp.name,
+    resourceGroupName: resourceGroup.name,
+    branch: SC_BRANCH,
+    repoUrl: SC_URL,
+    isManualIntegration: true,
+    isGitHubAction: false,
 });
 
 // Export Outputs
 exports.resourceGroupName = resourceGroup.name;
-exports.virtualNetworkName = virtualNetwork.name;
-exports.subnetName = subnet.name;
+exports.virtualNetworkName = vnet.name;
+exports.webAppSubnet = vnet.subnets[0].name;
+exports.cognitivSubnet = vnet.subnets[1].name;
 exports.privateDnsZoneName = privateDnsZone.name;
 exports.cognitiveAccountName = cognitiveAccount.name;
 exports.webAppName = webApp.name;
