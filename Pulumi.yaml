@@ -1,4 +1,4 @@
-name: Project1
+name: clco_project1
 description: A minimal JavaScript Pulumi program with the native Azure provider
 runtime:
   name: nodejs

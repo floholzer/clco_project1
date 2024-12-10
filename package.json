@@ -1,5 +1,5 @@
 {
-    "name": "Project1",
+    "name": "clco_project1",
     "main": "index.js",
     "dependencies": {
         "@pulumi/pulumi": "^3.0.0",

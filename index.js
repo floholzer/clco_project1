@@ -1,140 +1,180 @@
 const pulumi = require("@pulumi/pulumi");
 const azure = require("@pulumi/azure-native");
 
-// Configuration variables
-const resourceGroupName = "clco_project1";
-const location = "westus";
-const appServicePlanSku = {name: "B1", tier: "Basic", size: "B1", capacity: 3}; // Basic Tier mandatory with 3 instances
-const pythonVersion = "PYTHON|3.8";
-const SC_BRANCH ="main";
-const SC_URL = "https://github.com/dmelichar/clco-demo.git";
-const budgetScope = "/subscriptions/baf14dc0-aa90-480a-a428-038a6943c5b3"; // Subscription ID of Holzer's Azure Account
+// Configuration
+const location = "eastus";
+const repoUrl = "https://github.com/dmelichar/clco-demo";
+const branch = "main";
 
-
-
-// Resource Group erstellen
-const resourceGroup = new azure.resources.ResourceGroup(resourceGroupName, {
-    location: location,
+// Resource Group
+const resourceGroup = new azure.resources.ResourceGroup("resourceGroup", {
+    location,
 });
 
-// Virtuelles Netzwerk erstellen
-const vnet = new azure.network.VirtualNetwork("vnet", {
+// Virtual Network
+const virtualNetwork = new azure.network.VirtualNetwork("myVNet", {
     resourceGroupName: resourceGroup.name,
-    location: resourceGroup.location,
-    addressSpace: {addressPrefixes: ["10.0.0.0/16"]},
-    subnets: [
-        {name: "privateEndPoint", addressPrefix: "10.0.1.0/24"},
-        {name: "webappSubnet", addressPrefix: "10.0.2.0/24"},
-    ],
+    location,
+    addressSpace: {
+        addressPrefixes: ["10.0.0.0/16"],
+    },
 });
 
-// Private DNS Zone
-const privateDnsZone = new azure.network.PrivateZone("privateDnsZone", {
+// Subnet for App Service
+const appSubnet = new azure.network.Subnet("appSubnet", {
     resourceGroupName: resourceGroup.name,
-    location: resourceGroup.location,
+    virtualNetworkName: virtualNetwork.name,
+    addressPrefix: "10.0.0.0/24",
+    delegations: [{
+        name: "delegation",
+        serviceName: "Microsoft.Web/serverfarms",
+    }],
+    privateEndpointNetworkPolicies: "Enabled",
+});
+
+// Subnet for Private Endpoint
+const endpointSubnet = new azure.network.Subnet("endpointSubnet", {
+    resourceGroupName: resourceGroup.name,
+    virtualNetworkName: virtualNetwork.name,
+    addressPrefix: "10.0.1.0/24",
+    privateEndpointNetworkPolicies: "Disabled",
+});
+
+// DNS Zone
+const dnsZone = new azure.network.PrivateZone("dnsZone", {
     privateZoneName: "privatelink.cognitiveservices.azure.com",
-});
-
-// Virtual Network Link to DNS Zone
-const vnetLink = new azure.network.VirtualNetworkLink("vnet-link", {
     resourceGroupName: resourceGroup.name,
-    privateZoneName: privateDnsZone.name,
-    virtualNetwork: {id: vnet.id},
-    registrationEnabled: true,
+    location: "global",
 });
 
 // Cognitive Services Account
-const cognitiveAccount = new azure.cognitiveservices.Account("cognitiveAccount", {
+const languageAccount = new azure.cognitiveservices.Account("myLanguageService", {
     resourceGroupName: resourceGroup.name,
-    location: resourceGroup.location,
+    location,
     kind: "TextAnalytics",
-    sku: {name: "S"},
-    properties: {
-        name: "privateEndPoint",
-        privateEndpoint: { subnet: { id: vnet.subnets[0].id } },
-        privateLinkServiceConnectionState: {
-            status: "Approved",
-            description: "Auto-Approved",
-        },
+    sku: { name: "F0" },
+    identity: { type: "SystemAssigned" },
+    publicNetworkAccess: "Disabled",
+    customSubDomainName: "DziHolLanguageService",
+});
+
+// Account Keys Output
+const accountKeys = pulumi.output(azure.cognitiveservices.listAccountKeys({
+    resourceGroupName: resourceGroup.name,
+    accountName: languageAccount.name,
+}));
+
+// Virtual Network Link
+const dnsZoneVirtualNetworkLink = new azure.network.VirtualNetworkLink("dnsZoneVirtualNetworkLink", {
+    resourceGroupName: resourceGroup.name,
+    privateZoneName: dnsZone.name,
+    location: "global",
+    virtualNetwork: {
+        id: virtualNetwork.id,
     },
+    registrationEnabled: false,
+});
+
+// Private Endpoint
+const privateEndpoint = new azure.network.PrivateEndpoint("privateEndpoint", {
+    resourceGroupName: resourceGroup.name,
+    location,
+    subnet: {
+        id: endpointSubnet.id,
+    },
+    privateLinkServiceConnections: [{
+        name: "languageServiceConnection",
+        privateLinkServiceId: languageAccount.id,
+        groupIds: ["account"],
+    }],
+}, {
+    dependsOn: [languageAccount], // Abhängigkeit hinzufügen
+});
+
+// Private DNS Zone Group
+const privateDnsZoneGroup = new azure.network.PrivateDnsZoneGroup("privateDnsZoneGroup", {
+    resourceGroupName: resourceGroup.name,
+    privateEndpointName: privateEndpoint.name,
+    privateDnsZoneConfigs: [{
+        name: "config",
+        privateDnsZoneId: dnsZone.id,
+    }],
 });
 
 // App Service Plan
 const appServicePlan = new azure.web.AppServicePlan("appServicePlan", {
     resourceGroupName: resourceGroup.name,
-    location: resourceGroup.location,
-    sku: appServicePlanSku,
+    location,
+    sku: {
+        capacity: 3,
+        name: "B1",
+        tier: "Basic",
+    },
+    kind: "linux",
+    reserved: true,
 });
 
-// Web App
-const webApp = new azure.web.WebApp("WebApp", {
+// App Service
+const webApp = new azure.web.WebApp("webApp", {
     resourceGroupName: resourceGroup.name,
-    location: resourceGroup.location,
+    location,
     serverFarmId: appServicePlan.id,
     httpsOnly: true,
+    kind: "app,linux",
     siteConfig: {
-        linuxFxVersion: pythonVersion,
-        vnetRouteAllEnabled: true,
-        scmType: "LocalGit",
-        virtualNetworkSubnetId: vnet.subnets[1].id,
-        virtualApplications: [{
-            virtualPath: "/",
-            physicalPath: "site\\wwwroot",
-            preloadEnabled: true,
-        }],
+        linuxFxVersion: "PYTHON|3.8",
+        appSettings: [
+            { name: "AZ_ENDPOINT", value: `https://clcoLanguageService.cognitiveservices.azure.com/` },
+            { name: "AZ_KEY", value: accountKeys.keys[0] },
+            { name: "WEBSITE_RUN_FROM_PACKAGE", value: "0" },
+        ],
+        alwaysOn: true,
+        ftpsState: "Disabled",
     },
 });
 
-// Configure App Settings with Cognitive Services Endpoint and Key
-const appSettings = new azure.web.WebAppApplicationSettings("AppSettings", {
-    resourceGroupName: resourceGroup.name,
+// VNet Integration
+const vnetIntegration = new azure.web.WebAppSwiftVirtualNetworkConnection("vnetIntegration", {
     name: webApp.name,
-    properties: {
-        "COGNITIVE_ENDPOINT": cognitiveAccount.endpoint,
-        "COGNITIVE_KEY": cognitiveAccount.primaryKey,
-    },
+    resourceGroupName: resourceGroup.name,
+    subnetResourceId: appSubnet.id,
 });
 
-// add Source Control
-const sourceControl = new azure.web.WebAppSourceControl("SourceControl", {
+// Source Control
+const sourceControl = new azure.web.WebAppSourceControl("sourceControl", {
     name: webApp.name,
     resourceGroupName: resourceGroup.name,
-    branch: SC_BRANCH,
-    repoUrl: SC_URL,
+    repoUrl,
+    branch,
     isManualIntegration: true,
+    deploymentRollbackEnabled: false,
     isGitHubAction: false,
 });
 
-// Define a cost-efficient budget
-const budget = new azure.consumption.Budget("workshopBudget", {
-    scope: budgetScope,
-    resourceGroupName: resourceGroup.name,
-    amount: 5, // Example budget in USD
+// Budget
+const budget = new azure.costmanagement.Budget("myBudget2", {
+    scope: "/subscriptions/f12b721a-38e7-4d35-a686-0af70d663353",
+    amount: 5,
+    category: "Cost",
     timeGrain: "Monthly",
     timePeriod: {
-        startDate: "2024-12-01",
-        endDate: "2024-12-31",
+        startDate: "2024-12-01T00:00:00Z",
+        endDate: "2025-12-31T00:00:00Z",
     },
-    category: "Cost",
     notifications: {
         Actual_GreaterThan_80_Percent: {
-            contactEmails: [
-                "wi22b090@technikum-wien.at",
-                "wi22b004@technikum-wien.at",
-            ],
             enabled: true,
-            locale: azure.consumption.CultureCode.En_us,
-            operator: azure.consumption.OperatorType.GreaterThan,
+            operator: "GreaterThan",
             threshold: 80,
-            thresholdType: azure.consumption.ThresholdType.Actual,
+            contactEmails: ["wi22b004@technikum-wien.at"],
+            thresholdType: "Actual",
+        },
+        Forecasted_GreaterThan_100_Percent: {
+            enabled: true,
+            operator: "GreaterThan",
+            threshold: 100,
+            contactEmails: ["wi22b004@technikum-wien.at"],
+            thresholdType: "Forecasted",
         },
     },
 });
-
-// Export Outputs
-exports.resourceGroupName = resourceGroup.name;
-exports.virtualNetworkName = vnet.name;
-exports.privateDnsZoneName = privateDnsZone.name;
-exports.cognitiveAccountName = cognitiveAccount.name;
-exports.webAppName = webApp.name;
-exports.endpoint = webApp.defaultHostName;
