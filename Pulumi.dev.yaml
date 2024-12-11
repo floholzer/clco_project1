@@ -1,2 +1,4 @@
 config:
-  azure-native:location: eastus
+  azure-native:location: northeurope
+  pulumi:tags:
+    pulumi:template: azure-javascript
