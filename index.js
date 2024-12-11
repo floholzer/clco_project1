@@ -53,15 +53,14 @@ const cognitiveAccount = new azure.cognitiveservices.Account("cognitiveAccount",
     resourceGroupName: resourceGroup.name,
     location: resourceGroup.location,
     kind: "TextAnalytics",
-    identity: {type: "SystemAssigned"},
-    sku: {name: "S"},
+    sku: {name: "F0"},
     properties: {
         publicNetworkAccess: "Disabled",
-        customSubDomainName: "DzHoLanguageService1",
+        customSubDomainName: "DzHoLanguageService",
     },
 });
 
-// Private Endpoint erstellen
+// Private Endpoint für Cognitive Service erstellen
 const privateEndpoint = new azure.network.PrivateEndpoint("privateEndpoint", {
     resourceGroupName: resourceGroup.name,
     location: resourceGroup.location,
@@ -70,6 +69,15 @@ const privateEndpoint = new azure.network.PrivateEndpoint("privateEndpoint", {
         name: "cognitiveServiceConnection",
         privateLinkServiceId: cognitiveAccount.id,
         groupIds: ["account"],
+    }],
+});
+
+const privateDnsZoneGroup = new azure.network.PrivateDnsZoneGroup("privateDnsZoneGroup", {
+    resourceGroupName: resourceGroup.name,
+    privateEndpointName: privateEndpoint.name,
+    privateDnsZoneConfigs: [{
+        name: privateDnsZone.name + "-config",
+        privateDnsZoneId: privateDnsZone.id,
     }],
 });
 
@@ -82,31 +90,21 @@ const vnetLink = new azure.network.VirtualNetworkLink("vnet-link", {
     registrationEnabled: false,
 });
 
-const privateDnsZoneGroup = new azure.network.PrivateDnsZoneGroup("privateDnsZoneGroup", {
-    resourceGroupName: resourceGroup.name,
-    privateEndpointName: privateEndpoint.name,
-    privateDnsZoneConfigs: [{
-        name: privateDnsZone.name + "-config",
-        privateDnsZoneId: privateDnsZone.id,
-    }],
-});
-
 // App Service Plan
 const appServicePlan = new azure.web.AppServicePlan("appServicePlan", {
     resourceGroupName: resourceGroup.name,
     location: resourceGroup.location,
-    kind: "linux",
-    reserved: true,
     sku: {
         name: "B1",
         tier: "Basic",
-        size: "B1",
         capacity: 3, // 3 instances
     },
+    kind: "linux",
+    reserved: true,
 });
 
 // Cognitive Account Keys
-const accountKeys = azure.cognitiveservices.listAccountKeys({
+const accountKeys = azure.cognitiveservices.listAccountKeysOutput({
     resourceGroupName: resourceGroup.name,
     accountName: cognitiveAccount.name,
 })
@@ -117,18 +115,20 @@ const webApp = new azure.web.WebApp("WebApp", {
     resourceGroupName: resourceGroup.name,
     location: resourceGroup.location,
     serverFarmId: appServicePlan.id,
-    kind: "app",
+    kind: "app,linux",
     httpsOnly: true,
+    virtualNetworkSubnetId: appSubnet.id,
     siteConfig: {
-        linuxFxVersion: "PYTHON|3.8",
-        vnetRouteAllEnabled: true,
+        linuxFxVersion: "PYTHON|3.9",
         alwaysOn: true,
-        virtualNetworkSubnetId: appSubnet.id,
-        appSettings: {
-            "AZ_ENDPOINT": "https://" + privateEndpoint.privateLinkServiceConnections.name + ".cognitiveservices.azure.com/",
-            "AZ_KEY": accountKeys.key1,
-            "WEBSITE_RUN_FROM_PACKAGE": "0",
-        }
+        ftpsState: "Disabled",
+        appSettings: [{
+            name: "AZ_ENDPOINT", value: cognitiveAccount.properties.endpoint,
+        }, {
+            name: "AZ_KEY", value: accountKeys.apply(keys => keys.key1),
+        }, {
+            name: "WEBSITE_RUN_FROM_PACKAGE", value: "0",
+        }],
     },
 });
 
@@ -143,7 +143,7 @@ const sourceControl = new azure.web.WebAppSourceControl("SourceControl", {
 });
 
 // Define a cost-efficient budget
-const budget = new azure.consumption.Budget("workshopBudget", {
+const budget = new azure.consumption.Budget("Project1Budget", {
     scope: budgetScope,
     resourceGroupName: resourceGroup.name,
     amount: 20, // 20$ (USD) budget
@@ -151,25 +151,17 @@ const budget = new azure.consumption.Budget("workshopBudget", {
     timePeriod: {
         startDate: "2024-12-01",
         endDate: "2024-12-31",
-    },
-    category: "Cost",
+    }, category: "Cost",
     notifications: {
         Actual_GreaterThan_80_Percent: {
-            contactEmails: [
-                "wi22b090@technikum-wien.at",
-                "wi22b004@technikum-wien.at",
-            ],
+            contactEmails: ["wi22b090@technikum-wien.at", "wi22b004@technikum-wien.at",],
             enabled: true,
             locale: azure.consumption.CultureCode.En_us,
             operator: azure.consumption.OperatorType.GreaterThan,
             threshold: 80,
             thresholdType: azure.consumption.ThresholdType.Actual,
-        },
-        Forecast_GreaterThan_80_Percent: {
-            contactEmails: [
-                "wi22b090@technikum-wien.at",
-                "wi22b004@technikum-wien.at",
-            ],
+        }, Forecast_GreaterThan_80_Percent: {
+            contactEmails: ["wi22b090@technikum-wien.at", "wi22b004@technikum-wien.at",],
             enabled: true,
             operator: azure.consumption.OperatorType.GreaterThan,
             threshold: 80,
