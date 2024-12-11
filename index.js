@@ -4,12 +4,9 @@ const azure = require("@pulumi/azure-native");
 // Configuration variables
 const resourceGroupName = "clco_project1";
 const location = "westus";
-const appServicePlanSku = {name: "B1", tier: "Basic", size: "B1", capacity: 3}; // Basic Tier mandatory with 3 instances
-const pythonVersion = "PYTHON|3.8";
-const SC_BRANCH ="main";
-const SC_URL = "https://github.com/dmelichar/clco-demo.git";
+const SC_BRANCH = "main";
+const SC_URL = "https://github.com/floholzer/clco-demo";
 const budgetScope = "/subscriptions/baf14dc0-aa90-480a-a428-038a6943c5b3"; // Subscription ID of Holzer's Azure Account
-
 
 
 // Resource Group erstellen
@@ -22,25 +19,33 @@ const vnet = new azure.network.VirtualNetwork("vnet", {
     resourceGroupName: resourceGroup.name,
     location: resourceGroup.location,
     addressSpace: {addressPrefixes: ["10.0.0.0/16"]},
-    subnets: [
-        {name: "privateEndPoint", addressPrefix: "10.0.1.0/24"},
-        {name: "webappSubnet", addressPrefix: "10.0.2.0/24"},
-    ],
+});
+
+// WebApp Subnet erstellen
+const appSubnet = new azure.network.Subnet("appSubnet", {
+    resourceGroupName: resourceGroup.name,
+    virtualNetworkName: vnet.name,
+    addressPrefix: "10.0.2.0/24",
+    delegations: [{
+        name: "delegation",
+        serviceName: "Microsoft.Web/serverFarms",
+    }],
+    privateEndpointNetworkPolicies: "Enabled",
+});
+
+// PrivateEndpoint Subnet erstellen
+const endPointSubnet = new azure.network.Subnet("endPointSubnet", {
+    resourceGroupName: resourceGroup.name,
+    virtualNetworkName: vnet.name,
+    addressPrefix: "10.0.1.0/24",
+    privateEndpointNetworkPolicies: "Disabled",
 });
 
 // Private DNS Zone
 const privateDnsZone = new azure.network.PrivateZone("privateDnsZone", {
     resourceGroupName: resourceGroup.name,
-    location: resourceGroup.location,
+    location: "Global",
     privateZoneName: "privatelink.cognitiveservices.azure.com",
-});
-
-// Virtual Network Link to DNS Zone
-const vnetLink = new azure.network.VirtualNetworkLink("vnet-link", {
-    resourceGroupName: resourceGroup.name,
-    privateZoneName: privateDnsZone.name,
-    virtualNetwork: {id: vnet.id},
-    registrationEnabled: true,
 });
 
 // Cognitive Services Account
@@ -48,22 +53,56 @@ const cognitiveAccount = new azure.cognitiveservices.Account("cognitiveAccount",
     resourceGroupName: resourceGroup.name,
     location: resourceGroup.location,
     kind: "TextAnalytics",
+    identity: {type: "SystemAssigned"},
     sku: {name: "S"},
     properties: {
-        name: "privateEndPoint",
-        privateEndpoint: { subnet: { id: vnet.subnets[0].id } },
-        privateLinkServiceConnectionState: {
-            status: "Approved",
-            description: "Auto-Approved",
-        },
+        publicNetworkAccess: "Disabled",
+        customSubDomainName: "DzHoLanguageService1",
     },
+});
+
+// Private Endpoint erstellen
+const privateEndpoint = new azure.network.PrivateEndpoint("privateEndpoint", {
+    resourceGroupName: resourceGroup.name,
+    location: resourceGroup.location,
+    subnet: {id: endPointSubnet.id},
+    privateLinkServiceConnections: [{
+        name: "cognitiveServiceConnection",
+        privateLinkServiceId: cognitiveAccount.id,
+        groupIds: ["account"],
+    }],
+});
+
+// Virtual Network Link to DNS Zone
+const vnetLink = new azure.network.VirtualNetworkLink("vnet-link", {
+    resourceGroupName: resourceGroup.name,
+    privateZoneName: privateDnsZone.name,
+    location: "global",
+    virtualNetwork: {id: vnet.id},
+    registrationEnabled: false,
+});
+
+const privateDnsZoneGroup = new azure.network.PrivateDnsZoneGroup("privateDnsZoneGroup", {
+    resourceGroupName: resourceGroup.name,
+    privateEndpointName: privateEndpoint.name,
+    privateDnsZoneConfigs: [{
+        name: privateDnsZone.name + "-config",
+        privateDnsZoneId: privateDnsZone.id,
+    }],
 });
 
 // App Service Plan
 const appServicePlan = new azure.web.AppServicePlan("appServicePlan", {
     resourceGroupName: resourceGroup.name,
     location: resourceGroup.location,
-    sku: appServicePlanSku,
+    kind: "linux",
+    reserved: true,
+    sku: {
+        name: "B1",
+        tier: "Basic",
+        size: "B1",
+        capacity: 3, // 3 instances
+    },
 });
 
 // Cognitive Account Keys
@@ -74,31 +113,22 @@ const accountKeys = azure.cognitiveservices.listAccountKeys({
 
 // Web App
 const webApp = new azure.web.WebApp("WebApp", {
+    name: "DzHo-Webapp",
     resourceGroupName: resourceGroup.name,
     location: resourceGroup.location,
     serverFarmId: appServicePlan.id,
     kind: "app",
     httpsOnly: true,
     siteConfig: {
-        linuxFxVersion: pythonVersion,
+        linuxFxVersion: "PYTHON|3.8",
         vnetRouteAllEnabled: true,
-        scmType: "LocalGit",
-        virtualNetworkSubnetId: vnet.subnets[1].id,
-        virtualApplications: [{
-            virtualPath: "/",
-            physicalPath: "site\\wwwroot",
-            preloadEnabled: true,
-        }],
-    },
-});
-
-// Configure App Settings with Cognitive Services Endpoint and Key
-const appSettings = new azure.web.WebAppApplicationSettings("AppSettings", {
-    resourceGroupName: resourceGroup.name,
-    name: webApp.name,
-    properties: {
-        "COGNITIVE_ENDPOINT": cognitiveAccount.endpoint,
-        "COGNITIVE_KEY": cognitiveAccount.primaryKey,
+        alwaysOn: true,
+        virtualNetworkSubnetId: appSubnet.id,
+        appSettings: {
+            "AZ_ENDPOINT": "https://" + privateEndpoint.privateLinkServiceConnections.name + ".cognitiveservices.azure.com/",
+            "AZ_KEY": accountKeys.key1,
+            "WEBSITE_RUN_FROM_PACKAGE": "0",
+        }
     },
 });
 
@@ -116,7 +146,7 @@ const sourceControl = new azure.web.WebAppSourceControl("SourceControl", {
 const budget = new azure.consumption.Budget("workshopBudget", {
     scope: budgetScope,
     resourceGroupName: resourceGroup.name,
-    amount: 5, // Example budget in USD
+    amount: 20, // 20$ (USD) budget
     timeGrain: "Monthly",
     timePeriod: {
         startDate: "2024-12-01",
